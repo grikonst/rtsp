@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # RTSP Stream Manager - TUI для управления трансляцией видео в RTSP
-# Версия: 2.0
-# Добавлен экспорт в CSV с метаданными видео
+# Версия: 3.0
+# Исправлены проблемы с артефактами, добавлен выбор режима воспроизведения
 
 # Конфигурация
 CONFIG_DIR="$HOME/.rtsp-srv"
@@ -12,6 +12,13 @@ LOG_FILE="$CONFIG_DIR/streams.log"
 PID_DIR="$CONFIG_DIR/pids"
 REPORT_DIR="$CONFIG_DIR/reports"
 CSV_EXPORT="$REPORT_DIR/streams_report_$(date +%Y%m%d_%H%M%S).csv"
+
+# Цвета для вывода (если не в TUI)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
 # Создание директорий конфигурации
 init_config() {
@@ -30,10 +37,11 @@ RTSP_SERVER_IP="localhost"
 RTSP_SERVER_PORT="8554"
 MEDIAMTX_IMAGE="bluenviron/mediamtx:latest"
 VIDEO_DIR="$HOME/Videos"
-STREAM_LOOP="true"
 RTSP_TRANSPORT="tcp"
 USE_PV="true"
-USE_LOCAL_FFMPEG="true"
+VIDEO_CODEC="libx264"
+PRESET="fast"
+CRF="23"
 EOF
     fi
 }
@@ -51,10 +59,11 @@ RTSP_SERVER_IP="$RTSP_SERVER_IP"
 RTSP_SERVER_PORT="$RTSP_SERVER_PORT"
 MEDIAMTX_IMAGE="$MEDIAMTX_IMAGE"
 VIDEO_DIR="$VIDEO_DIR"
-STREAM_LOOP="$STREAM_LOOP"
 RTSP_TRANSPORT="$RTSP_TRANSPORT"
 USE_PV="$USE_PV"
-USE_LOCAL_FFMPEG="$USE_LOCAL_FFMPEG"
+VIDEO_CODEC="$VIDEO_CODEC"
+PRESET="$PRESET"
+CRF="$CRF"
 EOF
 }
 
@@ -81,44 +90,44 @@ show_progress() {
     fi
 }
 
-# Получение метаданных видео через локальный ffmpeg
+# Получение метаданных видео через ffmpeg
 get_video_metadata() {
     local video_file="$1"
     
-    if [ "$USE_LOCAL_FFMPEG" = "true" ] && command -v ffprobe &> /dev/null; then
-        # Получаем разрешение
-        local resolution=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$video_file" 2>/dev/null | sed 's/,/x/')
-        [ -z "$resolution" ] && resolution="N/A"
-        
-        # Получаем FPS
-        local fps=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$video_file" 2>/dev/null | bc -l 2>/dev/null | xargs printf "%.2f")
-        [ -z "$fps" ] && fps="N/A"
-        
-        # Получаем битрейт
-        local bitrate=$(ffprobe -v error -show_entries format=bit_rate -of csv=p=0 "$video_file" 2>/dev/null)
-        if [ -n "$bitrate" ] && [ "$bitrate" != "N/A" ]; then
-            bitrate=$(echo "scale=2; $bitrate/1000" | bc 2>/dev/null)
-            bitrate="${bitrate} kbps"
-        else
-            bitrate="N/A"
-        fi
-        
-        # Получаем кодек видео
-        local codec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$video_file" 2>/dev/null)
-        [ -z "$codec" ] && codec="N/A"
-        
-        # Получаем длительность
-        local duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$video_file" 2>/dev/null)
-        if [ -n "$duration" ] && [ "$duration" != "N/A" ]; then
-            duration=$(printf '%02d:%02d:%02d' $(echo "$duration/3600" | bc) $(echo "($duration%3600)/60" | bc) $(echo "$duration%60" | bc))
-        else
-            duration="N/A"
-        fi
-        
-        echo "$resolution|$fps|$bitrate|$codec|$duration"
+    # Получаем разрешение
+    local resolution=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$video_file" 2>/dev/null | sed 's/,/x/')
+    [ -z "$resolution" ] && resolution="N/A"
+    
+    # Получаем FPS
+    local fps=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate -of csv=p=0 "$video_file" 2>/dev/null | bc -l 2>/dev/null | xargs printf "%.2f")
+    [ -z "$fps" ] && fps="N/A"
+    
+    # Получаем битрейт
+    local bitrate=$(ffprobe -v error -show_entries format=bit_rate -of csv=p=0 "$video_file" 2>/dev/null)
+    if [ -n "$bitrate" ] && [ "$bitrate" != "N/A" ]; then
+        bitrate=$(echo "scale=2; $bitrate/1000" | bc 2>/dev/null)
+        bitrate="${bitrate} kbps"
     else
-        echo "N/A|N/A|N/A|N/A|N/A"
+        bitrate="N/A"
     fi
+    
+    # Получаем кодек видео
+    local codec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$video_file" 2>/dev/null)
+    [ -z "$codec" ] && codec="N/A"
+    
+    # Получаем длительность
+    local duration=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$video_file" 2>/dev/null)
+    if [ -n "$duration" ] && [ "$duration" != "N/A" ]; then
+        duration=$(printf '%02d:%02d:%02d' $(echo "$duration/3600" | bc) $(echo "($duration%3600)/60" | bc) $(echo "$duration%60" | bc))
+    else
+        duration="N/A"
+    fi
+    
+    # Получаем профиль и уровень кодекса
+    local profile=$(ffprobe -v error -select_streams v:0 -show_entries stream=profile -of csv=p=0 "$video_file" 2>/dev/null)
+    [ -z "$profile" ] && profile="N/A"
+    
+    echo "$resolution|$fps|$bitrate|$codec|$duration|$profile"
 }
 
 # Экспорт отчета в CSV
@@ -127,15 +136,13 @@ export_to_csv() {
     local csv_file="$CSV_EXPORT"
     
     # Создаем заголовки CSV
-    echo "Видеофайл,Разрешение,FPS,Битрейт,Кодек,Длительность,RTSP-ссылка,Статус,Дата_запуска" > "$csv_file"
+    echo "Видеофайл,Разрешение,FPS,Битрейт,Кодек,Профиль,Длительность,RTSP-ссылка,Статус,Режим,Дата_запуска" > "$csv_file"
     
     # Добавляем данные
-    echo "$streams_data" >> "$csv_file"
+    echo -e "$streams_data" >> "$csv_file"
     
-    # Показываем прогресс сохранения
-    if check_pv; then
-        cat "$csv_file" | pv -l -s $(wc -l < "$csv_file") > /dev/null
-    fi
+    # Убираем лишние кавычки
+    sed -i 's/"//g' "$csv_file"
     
     echo "$csv_file"
 }
@@ -151,7 +158,7 @@ collect_videos_info() {
     local video_files=()
     while IFS= read -r file; do
         video_files+=("$file")
-    done < <(find "$video_dir" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" \) | sort)
+    done < <(find "$video_dir" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" -o -iname "*.m4v" -o -iname "*.mpg" -o -iname "*.mpeg" \) | sort)
     
     total_files=${#video_files[@]}
     
@@ -176,17 +183,24 @@ collect_videos_info() {
         
         # Получаем метаданные
         local metadata=$(get_video_metadata "$video_file")
-        IFS='|' read -r resolution fps bitrate codec duration <<< "$metadata"
+        IFS='|' read -r resolution fps bitrate codec duration profile <<< "$metadata"
         
         # Определяем статус потока
         local status="Не запущен"
+        local mode="Не указан"
         local pid_file="$PID_DIR/${mount_point}.pid"
-        if [ -f "$pid_file" ] && docker ps | grep -q "$(cat "$pid_file")" 2>/dev/null; then
+        local mode_file="$PID_DIR/${mount_point}.mode"
+        
+        if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
             status="Запущен"
+            if [ -f "$mode_file" ]; then
+                mode=$(cat "$mode_file")
+                [ "$mode" = "loop" ] && mode="Зациклен" || mode="Однократно"
+            fi
         fi
         
         # Добавляем строку
-        info="${info}\"$video_file\",\"$resolution\",\"$fps\",\"$bitrate\",\"$codec\",\"$duration\",\"$rtsp_url\",\"$status\",\"$(date '+%Y-%m-%d %H:%M:%S')\"\n"
+        info="${info}\"$video_file\",\"$resolution\",\"$fps\",\"$bitrate\",\"$codec\",\"$profile\",\"$duration\",\"$rtsp_url\",\"$status\",\"$mode\",\"$(date '+%Y-%m-%d %H:%M:%S')\"\n"
     done | whiptail --title "Сбор информации" --gauge "Анализ видеофайлов..." 8 60 0
     
     echo -e "$info"
@@ -194,7 +208,6 @@ collect_videos_info() {
 
 # Создание отчета с выбором видео
 generate_report() {
-    local temp_file=$(mktemp)
     local selected_videos=()
     
     # Получаем список видео для отчета
@@ -202,7 +215,7 @@ generate_report() {
     while IFS= read -r file; do
         local filename=$(basename "$file")
         video_files+=("$file" "$filename" "OFF")
-    done < <(find "$VIDEO_DIR" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" \) | sort)
+    done < <(find "$VIDEO_DIR" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" -o -iname "*.m4v" -o -iname "*.mpg" -o -iname "*.mpeg" \) | sort)
     
     if [ ${#video_files[@]} -eq 0 ]; then
         whiptail --title "Ошибка" --msgbox "Видеофайлы не найдены в папке:\n$VIDEO_DIR" 8 50
@@ -220,7 +233,7 @@ generate_report() {
     case $choice in
         "all")
             # Все видео в папке
-            local all_files=$(find "$VIDEO_DIR" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" \) | sort)
+            local all_files=$(find "$VIDEO_DIR" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" -o -iname "*.m4v" -o -iname "*.mpg" -o -iname "*.mpeg" \) | sort)
             for file in $all_files; do
                 selected_videos+=("$file")
             done
@@ -246,7 +259,7 @@ generate_report() {
                 if [ -f "$pid_file" ]; then
                     local mount_point=$(basename "$pid_file" .pid)
                     # Ищем файл по mount_point
-                    local found_file=$(find "$VIDEO_DIR" -type f -name "*" | grep -i "$mount_point" | head -1)
+                    local found_file=$(find "$VIDEO_DIR" -type f -name "*" | grep -i "${mount_point}\." | head -1)
                     if [ -n "$found_file" ]; then
                         selected_videos+=("$found_file")
                     fi
@@ -283,16 +296,23 @@ generate_report() {
         
         # Получаем метаданные
         local metadata=$(get_video_metadata "$video_file")
-        IFS='|' read -r resolution fps bitrate codec duration <<< "$metadata"
+        IFS='|' read -r resolution fps bitrate codec duration profile <<< "$metadata"
         
         # Определяем статус потока
         local status="Не запущен"
+        local mode="Не указан"
         local pid_file="$PID_DIR/${mount_point}.pid"
-        if [ -f "$pid_file" ] && docker ps | grep -q "$(cat "$pid_file")" 2>/dev/null; then
+        local mode_file="$PID_DIR/${mount_point}.mode"
+        
+        if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
             status="Запущен"
+            if [ -f "$mode_file" ]; then
+                mode=$(cat "$mode_file")
+                [ "$mode" = "loop" ] && mode="Зациклен" || mode="Однократно"
+            fi
         fi
         
-        info="${info}\"$video_file\",\"$resolution\",\"$fps\",\"$bitrate\",\"$codec\",\"$duration\",\"$rtsp_url\",\"$status\",\"$(date '+%Y-%m-%d %H:%M:%S')\"\n"
+        info="${info}\"$video_file\",\"$resolution\",\"$fps\",\"$bitrate\",\"$codec\",\"$profile\",\"$duration\",\"$rtsp_url\",\"$status\",\"$mode\",\"$(date '+%Y-%m-%d %H:%M:%S')\"\n"
     done | whiptail --title "Сбор информации" --gauge "Анализ видеофайлов..." 8 60 0
     
     # Экспортируем в CSV
@@ -323,27 +343,52 @@ start_mediamtx() {
         docker stop rtsp-mediamtx 2>/dev/null
         docker rm rtsp-mediamtx 2>/dev/null
         
-        # Создаем конфиг для MediaMTX
+        # Создаем расширенный конфиг для MediaMTX с оптимизациями
         cat > "$CONFIG_DIR/mediamtx.yml" << EOF
-api: false
+# RTSP Configuration
 rtspAddress: :$RTSP_SERVER_PORT
 rtpAddress: :8002
 rtcpAddress: :8003
+readTimeout: 10s
+writeTimeout: 10s
+
+# Optimization for stable streaming
+protocol: tcp
+runOnDemand: false
+
+# Path configuration
 paths:
   all:
     source: publisher
-    sourceProtocol: udp
+    sourceProtocol: tcp
+    publishUser: ""
+    publishPass: ""
+    
+    # Video settings
+    rtspTransport: tcp
+    decoders:
+      - h264
+      - h265
+    
+    # Override for better compatibility
+    fallback: ""
+    
+    # Disable authentication for simplicity
+    publishUser: ""
+    publishPass: ""
+    readUser: ""
+    readPass: ""
 EOF
         
         # Запускаем MediaMTX
         docker run -d \
             --name rtsp-mediamtx \
             --restart unless-stopped \
-            -p $RTSP_SERVER_PORT:$RTSP_SERVER_PORT \
+            --network host \
             -v "$CONFIG_DIR/mediamtx.yml:/mediamtx.yml" \
             $MEDIAMTX_IMAGE > /dev/null 2>&1
         
-        sleep 2
+        sleep 3
         echo "MediaMTX запущен"
     else
         echo "MediaMTX уже работает"
@@ -360,58 +405,58 @@ stop_mediamtx() {
     fi
 }
 
-# Запуск потока для одного видео (используя локальный ffmpeg)
+# Запуск потока для одного видео с исправлением артефактов
 start_stream() {
     local video_file="$1"
+    local loop_mode="$2"
     local filename=$(basename "$video_file")
     local name_without_ext="${filename%.*}"
     local mount_point=$(echo "$name_without_ext" | sed 's/[^a-zA-Z0-9._-]/_/g')
     local pid_file="$PID_DIR/${mount_point}.pid"
+    local mode_file="$PID_DIR/${mount_point}.mode"
+    local log_file="$CONFIG_DIR/${mount_point}.log"
     
     # Проверяем, не запущен ли уже поток
-    if [ -f "$pid_file" ] && docker ps | grep -q "$(cat "$pid_file")" 2>/dev/null; then
+    if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
         return 1
     fi
     
-    # Формируем команду ffmpeg
-    local loop_flag=""
-    [ "$STREAM_LOOP" = "true" ] && loop_flag="-stream_loop -1"
+    # Сохраняем режим воспроизведения
+    echo "$loop_mode" > "$mode_file"
     
+    # Формируем параметры цикла для ffmpeg
+    local loop_param=""
+    [ "$loop_mode" = "loop" ] && loop_param="-stream_loop -1"
+    
+    # RTSP URL
     local rtsp_url="rtsp://$RTSP_SERVER_IP:$RTSP_SERVER_PORT/$mount_point"
-    local transport_flag=""
-    [ "$RTSP_TRANSPORT" = "tcp" ] && transport_flag="-rtsp_transport tcp"
     
-    if [ "$USE_LOCAL_FFMPEG" = "true" ] && command -v ffmpeg &> /dev/null; then
-        # Используем локальный ffmpeg
-        nohup ffmpeg $loop_flag -re \
-            -i "$video_file" \
-            -c copy \
-            $transport_flag \
-            -f rtsp "$rtsp_url" > "$CONFIG_DIR/${mount_point}.log" 2>&1 &
-        
-        local ffmpeg_pid=$!
-        echo "$ffmpeg_pid" > "$pid_file"
-        echo "$(date): Запущен поток $mount_point (PID: $ffmpeg_pid) -> $rtsp_url" >> "$LOG_FILE"
-    else
-        # Используем Docker как fallback
-        docker run -d \
-            --name "stream-$mount_point" \
-            --network host \
-            -v "$(dirname "$video_file"):/videos" \
-            --restart unless-stopped \
-            jrottenberg/ffmpeg:latest \
-            ffmpeg $loop_flag -re \
-            -i "/videos/$filename" \
-            -c copy \
-            $transport_flag \
-            -f rtsp "$rtsp_url" > /dev/null 2>&1
-        
-        local container_id=$(docker ps -q --filter "name=stream-$mount_point")
-        if [ -n "$container_id" ]; then
-            echo "$container_id" > "$pid_file"
-            echo "$(date): Запущен поток $mount_point (Container: $container_id) -> $rtsp_url" >> "$LOG_FILE"
-        fi
-    fi
+    # Определяем транспорт
+    local transport_flag="-rtsp_transport tcp"
+    
+    # Оптимизированные параметры ffmpeg для устранения артефактов
+    # Перекодируем видео в стабильный H.264 с фиксированным GOP и ключевыми кадрами
+    nohup ffmpeg $loop_param -re \
+        -i "$video_file" \
+        -c:v libx264 \
+        -preset ultrafast \
+        -tune zerolatency \
+        -crf 18 \
+        -pix_fmt yuv420p \
+        -g 25 \
+        -keyint_min 25 \
+        -sc_threshold 0 \
+        -b:v 2000k \
+        -maxrate 2000k \
+        -bufsize 4000k \
+        -an \
+        -f rtsp \
+        $transport_flag \
+        "$rtsp_url" > "$log_file" 2>&1 &
+    
+    local ffmpeg_pid=$!
+    echo "$ffmpeg_pid" > "$pid_file"
+    echo "$(date): Запущен поток $mount_point (PID: $ffmpeg_pid, режим: $loop_mode) -> $rtsp_url" >> "$LOG_FILE"
     
     return 0
 }
@@ -420,20 +465,17 @@ start_stream() {
 stop_stream() {
     local mount_point="$1"
     local pid_file="$PID_DIR/${mount_point}.pid"
+    local mode_file="$PID_DIR/${mount_point}.mode"
     
     if [ -f "$pid_file" ]; then
         local id=$(cat "$pid_file")
         
-        if [ "$USE_LOCAL_FFMPEG" = "true" ] && [[ "$id" =~ ^[0-9]+$ ]]; then
-            # Убиваем локальный ffmpeg процесс
-            kill -9 "$id" 2>/dev/null
-        else
-            # Останавливаем Docker контейнер
-            docker stop "$id" > /dev/null 2>&1
-            docker rm "$id" > /dev/null 2>&1
-        fi
+        # Убиваем ffmpeg процесс и его детей
+        pkill -P "$id" 2>/dev/null
+        kill -9 "$id" 2>/dev/null
         
         rm "$pid_file"
+        [ -f "$mode_file" ] && rm "$mode_file"
         echo "$(date): Остановлен поток $mount_point" >> "$LOG_FILE"
         return 0
     fi
@@ -448,21 +490,15 @@ get_stream_status() {
     if [ -f "$pid_file" ]; then
         local id=$(cat "$pid_file")
         
-        if [ "$USE_LOCAL_FFMPEG" = "true" ] && [[ "$id" =~ ^[0-9]+$ ]]; then
-            if kill -0 "$id" 2>/dev/null; then
-                echo "running"
-                return 0
-            fi
+        if kill -0 "$id" 2>/dev/null; then
+            echo "running"
+            return 0
         else
-            if docker ps | grep -q "$id"; then
-                echo "running"
-                return 0
-            fi
+            rm "$pid_file"
+            rm -f "$PID_DIR/${mount_point}.mode"
+            echo "stopped"
+            return 1
         fi
-        
-        rm "$pid_file"
-        echo "stopped"
-        return 1
     else
         echo "stopped"
         return 1
@@ -471,7 +507,7 @@ get_stream_status() {
 
 # Отображение статуса всех потоков
 show_status() {
-    local streams=$(ls "$PID_DIR" 2>/dev/null | sed 's/.pid$//')
+    local streams=$(ls "$PID_DIR" 2>/dev/null | grep -v '.mode$' | sed 's/.pid$//')
     
     if [ -z "$streams" ]; then
         whiptail --title "Статус потоков" --msgbox "Нет активных потоков" 8 40
@@ -484,9 +520,15 @@ show_status() {
     
     for stream in $streams; do
         local status=$(get_stream_status "$stream")
+        local mode_file="$PID_DIR/${stream}.mode"
+        local mode=$( [ -f "$mode_file" ] && cat "$mode_file" )
+        local mode_text=""
+        
+        [ "$mode" = "loop" ] && mode_text="🔄 Зациклен" || mode_text="▶️ Однократно"
+        
         local rtsp_url="rtsp://$RTSP_SERVER_IP:$RTSP_SERVER_PORT/$stream"
         if [ "$status" = "running" ]; then
-            status_text="${status_text}\n✅ $stream: РАБОТАЕТ\n   📺 $rtsp_url\n"
+            status_text="${status_text}\n✅ $stream: РАБОТАЕТ ($mode_text)\n   📺 $rtsp_url\n"
             ((running_count++))
         else
             status_text="${status_text}\n❌ $stream: ОСТАНОВЛЕН\n   📺 $rtsp_url\n"
@@ -499,18 +541,18 @@ show_status() {
     whiptail --title "Статус потоков" --msgbox "$status_text" 20 70
 }
 
-# Меню выбора видеофайлов
-select_videos() {
+# Меню выбора видеофайлов с выбором режима
+select_videos_with_mode() {
     local video_dir="$1"
     local files=()
     
     while IFS= read -r file; do
         local filename=$(basename "$file")
         local metadata=$(get_video_metadata "$file")
-        IFS='|' read -r resolution fps bitrate codec duration <<< "$metadata"
-        local display_name="$filename [$resolution, $fps fps, $duration]"
+        IFS='|' read -r resolution fps bitrate codec duration profile <<< "$metadata"
+        local display_name="$filename [$resolution, $fps fps, $codec, $duration]"
         files+=("$file" "$display_name" "OFF")
-    done < <(find "$video_dir" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" \) | sort)
+    done < <(find "$video_dir" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" -o -iname "*.m4v" -o -iname "*.mpg" -o -iname "*.mpeg" \) | sort)
     
     if [ ${#files[@]} -eq 0 ]; then
         whiptail --title "Ошибка" --msgbox "Видеофайлы не найдены в папке:\n$video_dir" 8 50
@@ -522,7 +564,27 @@ select_videos() {
         25 90 12 "${files[@]}" 3>&1 1>&2 2>&3)
     
     if [ $? -eq 0 ] && [ -n "$selected" ]; then
-        echo "$selected" | tr -d '"'
+        # Для каждого выбранного видео запрашиваем режим воспроизведения
+        local selected_files=$(echo "$selected" | tr -d '"')
+        local result=""
+        
+        for file in $selected_files; do
+            local filename=$(basename "$file")
+            local mode=$(whiptail --title "Режим воспроизведения: $filename" \
+                --radiolist "Выберите режим воспроизведения:" \
+                12 60 2 \
+                "loop" "Бесконечный цикл (зациклить видео)" ON \
+                "once" "Однократное воспроизведение" OFF \
+                3>&1 1>&2 2>&3)
+            
+            if [ -n "$mode" ]; then
+                result="${result}${file}:${mode}\n"
+            else
+                return 1
+            fi
+        done
+        
+        echo -e "$result"
         return 0
     fi
     return 1
@@ -530,34 +592,36 @@ select_videos() {
 
 # Запуск выбранных потоков с прогресс-баром
 start_selected_streams() {
-    local selected_files="$1"
+    local selected_data="$1"
     local started=0
     local failed=0
-    local total=$(echo "$selected_files" | wc -w)
+    local total=$(echo "$selected_data" | grep -c '^')
     local current=0
     
     # Сначала убеждаемся, что MediaMTX запущен
     if ! docker ps | grep -q "rtsp-mediamtx"; then
         start_mediamtx
-        sleep 2
+        sleep 3
     fi
     
-    for file in $selected_files; do
+    while IFS=':' read -r file mode; do
+        [ -z "$file" ] && continue
+        
         current=$((current + 1))
         percent=$((current * 100 / total))
         
         echo "$percent"
         echo "XXX"
-        echo "Запуск потока $current из $total: $(basename "$file")"
+        echo "Запуск потока $current из $total: $(basename "$file") (режим: $mode)"
         echo "XXX"
         
-        if start_stream "$file"; then
+        if start_stream "$file" "$mode"; then
             ((started++))
         else
             ((failed++))
         fi
         sleep 1
-    done | whiptail --title "Запуск потоков" --gauge "Запуск трансляций..." 8 60 0
+    done <<< "$selected_data" | whiptail --title "Запуск потоков" --gauge "Запуск трансляций..." 8 60 0
     
     whiptail --title "Результат" --msgbox "✅ Запущено потоков: $started\n❌ Ошибок: $failed" 8 40
 }
@@ -565,7 +629,7 @@ start_selected_streams() {
 # Остановка всех потоков с прогресс-баром
 stop_all_streams() {
     if whiptail --title "Подтверждение" --yesno "Остановить все потоки?" 8 40; then
-        local streams=$(ls "$PID_DIR" 2>/dev/null | sed 's/.pid$//')
+        local streams=$(ls "$PID_DIR" 2>/dev/null | grep -v '.mode$' | sed 's/.pid$//')
         local total=$(echo "$streams" | wc -w)
         local current=0
         local stopped=0
@@ -593,32 +657,34 @@ stop_all_streams() {
     fi
 }
 
-# Меню настроек
+# Меню настроек (упрощенное)
 settings_menu() {
     while true; do
         local settings_info="═══════════════════════════════════════\n"
         settings_info="${settings_info}  📡 IP адрес сервера:     $RTSP_SERVER_IP\n"
         settings_info="${settings_info}  🔌 Порт сервера:         $RTSP_SERVER_PORT\n"
         settings_info="${settings_info}  📁 Папка с видео:        $VIDEO_DIR\n"
-        settings_info="${settings_info}  🔁 Бесконечный цикл:     $([ "$STREAM_LOOP" = "true" ] && echo "ДА" || echo "НЕТ")\n"
         settings_info="${settings_info}  🌐 Транспорт RTSP:       $([ "$RTSP_TRANSPORT" = "tcp" ] && echo "TCP" || echo "UDP")\n"
         settings_info="${settings_info}  🐳 Образ MediaMTX:       $MEDIAMTX_IMAGE\n"
         settings_info="${settings_info}  📊 Использовать pv:      $([ "$USE_PV" = "true" ] && echo "ДА" || echo "НЕТ")\n"
-        settings_info="${settings_info}  🎬 Локальный ffmpeg:     $([ "$USE_LOCAL_FFMPEG" = "true" ] && echo "ДА" || echo "НЕТ")\n"
+        settings_info="${settings_info}  🎬 Кодек видео:          $VIDEO_CODEC\n"
+        settings_info="${settings_info}  ⚡ Preset кодирования:   $PRESET\n"
+        settings_info="${settings_info}  🎨 Качество (CRF):       $CRF\n"
         settings_info="${settings_info}═══════════════════════════════════════"
         
         local choice=$(whiptail --title "⚙️  НАСТРОЙКИ" \
             --menu "$settings_info\n\nВыберите параметр для изменения:" \
-            25 75 10 \
+            28 75 11 \
             "1" "📡 IP адрес RTSP сервера" \
             "2" "🔌 Порт RTSP сервера" \
             "3" "📁 Папка с видеофайлами" \
-            "4" "🔄 Бесконечный цикл (ДА/НЕТ)" \
-            "5" "🌐 Транспорт RTSP (TCP/UDP)" \
-            "6" "🐳 Образ MediaMTX в Docker" \
-            "7" "📊 Использовать pv для прогресс-баров" \
-            "8" "🎬 Использовать локальный ffmpeg" \
-            "9" "💾 Сохранить и вернуться" \
+            "4" "🌐 Транспорт RTSP (TCP/UDP)" \
+            "5" "🐳 Образ MediaMTX в Docker" \
+            "6" "📊 Использовать pv для прогресс-баров" \
+            "7" "🎬 Кодек видео (libx264/libx265)" \
+            "8" "⚡ Preset кодирования" \
+            "9" "🎨 Качество видео (CRF 0-51)" \
+            "10" "💾 Сохранить и вернуться" \
             3>&1 1>&2 2>&3)
         
         case $choice in
@@ -643,38 +709,50 @@ settings_menu() {
                 fi
                 ;;
             4)
-                local new_loop=$(whiptail --radiolist "Режим воспроизведения:" 10 50 2 \
-                    "true" "Бесконечный цикл (зациклить видео)" $( [ "$STREAM_LOOP" = "true" ] && echo ON || echo OFF ) \
-                    "false" "Однократное воспроизведение" $( [ "$STREAM_LOOP" = "false" ] && echo ON || echo OFF ) \
-                    3>&1 1>&2 2>&3)
-                [ -n "$new_loop" ] && STREAM_LOOP="$new_loop"
-                ;;
-            5)
                 local new_transport=$(whiptail --radiolist "Протокол транспорта RTSP:" 12 50 2 \
-                    "tcp" "TCP (надежнее, медленнее)" $( [ "$RTSP_TRANSPORT" = "tcp" ] && echo ON || echo OFF ) \
+                    "tcp" "TCP (надежнее, рекомендуется)" $( [ "$RTSP_TRANSPORT" = "tcp" ] && echo ON || echo OFF ) \
                     "udp" "UDP (быстрее, менее надежен)" $( [ "$RTSP_TRANSPORT" = "udp" ] && echo ON || echo OFF ) \
                     3>&1 1>&2 2>&3)
                 [ -n "$new_transport" ] && RTSP_TRANSPORT="$new_transport"
                 ;;
-            6)
+            5)
                 local new_image=$(whiptail --inputbox "Введите имя Docker образа MediaMTX:" 8 70 "$MEDIAMTX_IMAGE" 3>&1 1>&2 2>&3)
                 [ -n "$new_image" ] && MEDIAMTX_IMAGE="$new_image"
                 ;;
-            7)
+            6)
                 local new_pv=$(whiptail --radiolist "Использовать pv для прогресс-баров:" 10 50 2 \
                     "true" "Да (красивые прогресс-бары)" $( [ "$USE_PV" = "true" ] && echo ON || echo OFF ) \
                     "false" "Нет (простой текст)" $( [ "$USE_PV" = "false" ] && echo ON || echo OFF ) \
                     3>&1 1>&2 2>&3)
                 [ -n "$new_pv" ] && USE_PV="$new_pv"
                 ;;
-            8)
-                local new_local=$(whiptail --radiolist "Использовать локальный ffmpeg:" 12 60 2 \
-                    "true" "Да (быстрее, меньше нагрузки)" $( [ "$USE_LOCAL_FFMPEG" = "true" ] && echo ON || echo OFF ) \
-                    "false" "Нет (использовать Docker)" $( [ "$USE_LOCAL_FFMPEG" = "false" ] && echo ON || echo OFF ) \
+            7)
+                local new_codec=$(whiptail --radiolist "Видео кодек:" 12 50 2 \
+                    "libx264" "H.264 (лучшая совместимость)" ON \
+                    "libx265" "H.265 (лучшее сжатие)" OFF \
                     3>&1 1>&2 2>&3)
-                [ -n "$new_local" ] && USE_LOCAL_FFMPEG="$new_local"
+                [ -n "$new_codec" ] && VIDEO_CODEC="$new_codec"
+                ;;
+            8)
+                local new_preset=$(whiptail --radiolist "Preset кодирования (скорость/качество):" 15 60 4 \
+                    "ultrafast" "Очень быстро, низкое качество" OFF \
+                    "superfast" "Супер быстро" OFF \
+                    "veryfast" "Очень быстро" OFF \
+                    "faster" "Быстрее" OFF \
+                    "fast" "Быстро" ON \
+                    "medium" "Среднее (баланс)" OFF \
+                    3>&1 1>&2 2>&3)
+                [ -n "$new_preset" ] && PRESET="$new_preset"
                 ;;
             9)
+                local new_crf=$(whiptail --inputbox "Качество видео (CRF 0-51, меньше = лучше):\n0 - без потерь, 18-28 - хорошее качество, 51 - худшее" 10 60 "$CRF" 3>&1 1>&2 2>&3)
+                if [ -n "$new_crf" ] && [ "$new_crf" -ge 0 ] && [ "$new_crf" -le 51 ] 2>/dev/null; then
+                    CRF="$new_crf"
+                elif [ -n "$new_crf" ]; then
+                    whiptail --title "Ошибка" --msgbox "Неверное значение CRF. Должно быть от 0 до 51" 8 40
+                fi
+                ;;
+            10)
                 save_config
                 break
                 ;;
@@ -687,12 +765,12 @@ settings_menu() {
     done
 }
 
-# Главное меню
+# Главное меню (упрощенное)
 main_menu() {
     while true; do
-        local choice=$(whiptail --title "🎬 RTSP STREAM MANAGER v2.0" \
+        local choice=$(whiptail --title "🎬 RTSP STREAM MANAGER v3.0" \
             --menu "Управление RTSP трансляциями видео\n═══════════════════════════════════════" \
-            22 70 11 \
+            20 70 9 \
             "1" "🚀 Запустить MediaMTX сервер" \
             "2" "🛑 Остановить MediaMTX сервер" \
             "3" "🎥 Выбрать видео и запустить трансляцию" \
@@ -701,9 +779,7 @@ main_menu() {
             "6" "📊 Показать статус потоков" \
             "7" "📈 Создать отчет CSV с метаданными" \
             "8" "⚙️  Настройки" \
-            "9" "📋 Показать логи" \
-            "10" "🧹 Очистить неактивные потоки" \
-            "11" "🚪 Выход" \
+            "9" "🚪 Выход" \
             3>&1 1>&2 2>&3)
         
         case $choice in
@@ -717,17 +793,30 @@ main_menu() {
                 whiptail --title "Информация" --msgbox "✅ MediaMTX сервер остановлен" 8 40
                 ;;
             3)
-                local selected=$(select_videos "$VIDEO_DIR")
+                local selected=$(select_videos_with_mode "$VIDEO_DIR")
                 if [ $? -eq 0 ] && [ -n "$selected" ]; then
                     start_selected_streams "$selected"
                 fi
                 ;;
             4)
-                local all_files=$(find "$VIDEO_DIR" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" \) | sort | tr '\n' ' ')
+                # Для всех видео используем режим loop по умолчанию
+                local all_files=$(find "$VIDEO_DIR" -maxdepth 1 -type f \( -iname "*.avi" -o -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.flv" -o -iname "*.wmv" -o -iname "*.m4v" -o -iname "*.mpg" -o -iname "*.mpeg" \) | sort)
+                
                 if [ -n "$all_files" ]; then
-                    local count=$(echo "$all_files" | wc -w)
-                    if whiptail --title "Подтверждение" --yesno "Запустить трансляцию ВСЕХ видео ($count файлов) из папки:\n$VIDEO_DIR" 10 60; then
-                        start_selected_streams "$all_files"
+                    local count=$(echo "$all_files" | wc -l)
+                    local mode=$(whiptail --title "Режим воспроизведения" \
+                        --radiolist "Выберите режим для всех видео:" \
+                        12 60 2 \
+                        "loop" "Бесконечный цикл (зациклить видео)" ON \
+                        "once" "Однократное воспроизведение" OFF \
+                        3>&1 1>&2 2>&3)
+                    
+                    if [ -n "$mode" ] && whiptail --title "Подтверждение" --yesno "Запустить трансляцию ВСЕХ видео ($count файлов) из папки:\n$VIDEO_DIR\nРежим: $([ "$mode" = "loop" ] && echo "Бесконечный цикл" || echo "Однократно")" 12 60; then
+                        local selected_data=""
+                        for file in $all_files; do
+                            selected_data="${selected_data}${file}:${mode}\n"
+                        done
+                        start_selected_streams "$selected_data"
                     fi
                 else
                     whiptail --title "Ошибка" --msgbox "❌ Видеофайлы не найдены в папке:\n$VIDEO_DIR" 8 50
@@ -746,28 +835,6 @@ main_menu() {
                 settings_menu
                 ;;
             9)
-                if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
-                    whiptail --title "Журнал событий" --textbox "$LOG_FILE" 25 80
-                else
-                    whiptail --title "Журнал событий" --msgbox "Журнал пуст" 8 40
-                fi
-                ;;
-            10)
-                # Очистка неактивных потоков
-                local cleaned=0
-                for pid_file in "$PID_DIR"/*.pid; do
-                    if [ -f "$pid_file" ]; then
-                        local mount_point=$(basename "$pid_file" .pid)
-                        local status=$(get_stream_status "$mount_point")
-                        if [ "$status" != "running" ]; then
-                            rm "$pid_file"
-                            ((cleaned++))
-                        fi
-                    fi
-                done
-                whiptail --title "Очистка" --msgbox "Очищено неактивных записей: $cleaned" 8 40
-                ;;
-            11)
                 if whiptail --title "Выход" --yesno "Вы уверены, что хотите выйти?\n\nПотоки продолжат работать в фоне." 10 50; then
                     exit 0
                 fi
@@ -778,7 +845,7 @@ main_menu() {
 
 # Проверка зависимостей
 check_dependencies() {
-    local deps=("docker" "whiptail")
+    local deps=("docker" "whiptail" "ffmpeg" "ffprobe")
     local missing=()
     
     for dep in "${deps[@]}"; do
@@ -787,32 +854,18 @@ check_dependencies() {
         fi
     done
     
-    # Проверяем ffmpeg/ffprobe если включен локальный режим
-    if [ "$USE_LOCAL_FFMPEG" = "true" ]; then
-        if ! command -v ffmpeg &> /dev/null; then
-            echo "⚠️  ВНИМАНИЕ: ffmpeg не найден в системе"
-            echo "Будет использован Docker контейнер с ffmpeg"
-            USE_LOCAL_FFMPEG="false"
-            save_config
-            sleep 2
-        fi
-        if ! command -v ffprobe &> /dev/null; then
-            echo "⚠️  ВНИМАНИЕ: ffprobe не найден в системе"
-            echo "Метаданные видео будут недоступны"
-        fi
-    fi
-    
     if [ ${#missing[@]} -gt 0 ]; then
         echo "❌ Отсутствуют зависимости: ${missing[*]}"
         echo "Пожалуйста, установите:"
         echo "  - docker"
         echo "  - whiptail (пакет whiptail или newt)"
+        echo "  - ffmpeg и ffprobe (пакет ffmpeg)"
         echo ""
         echo "Для установки на Ubuntu/Debian:"
-        echo "  sudo apt install docker.io whiptail"
+        echo "  sudo apt install docker.io whiptail ffmpeg"
         echo ""
         echo "Для установки на CentOS/RHEL:"
-        echo "  sudo yum install docker newt"
+        echo "  sudo yum install docker newt ffmpeg"
         exit 1
     fi
 }
@@ -821,7 +874,7 @@ check_dependencies() {
 show_banner() {
     clear
     echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}   🎬 RTSP Stream Manager v2.0 - Управление RTSP трансляциями${NC}"
+    echo -e "${GREEN}   🎬 RTSP Stream Manager v3.0 - Управление RTSP трансляциями${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${YELLOW}   📁 Конфигурация: $CONFIG_DIR${NC}"
     echo -e "${YELLOW}   📝 Лог-файл: $LOG_FILE${NC}"
